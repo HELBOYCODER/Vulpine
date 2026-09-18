@@ -73,7 +73,7 @@ enum HTTPClient {
         contentType: String = "application/json",
         authorization: String? = nil,
         customUserAgent: String? = nil,
-        additionalHeaders: [String: String] = [],
+        additionalHeaders: [String: String] = [:],
         session: URLSession = HTTPClient.shared
     ) async throws -> (statusCode: Int, body: String) {
         guard let request = makeRequest(

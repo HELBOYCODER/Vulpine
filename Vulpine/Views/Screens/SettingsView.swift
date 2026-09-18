@@ -40,7 +40,7 @@ struct SettingsView: View {
                 }
 
                 Section("Verification") {
-                    Toggle("Exit verification", isOn: $settings.exitVerificationEnabled)
+                    Toggle("Exit verification", isOn: $settings.exitCheckEnabled)
                     Text("Checks IP exit country against Cloudflare trace after connecting.")
                         .font(.caption)
                         .foregroundColor(.secondary)

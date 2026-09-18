@@ -70,7 +70,8 @@ enum GuardianClient {
             subscribed: body.bool("subscribed"),
             uid: body.string("uid"),
             maxBytes: body.optionalInt64("maxBytes"),
-            limitedBandwidth: body.bool("limited_bandwidth")
+            limitedBandwidth: body.bool("limited_bandwidth"),
+            quotaRemaining: nil
         )
     }
 

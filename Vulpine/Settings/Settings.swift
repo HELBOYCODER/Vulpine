@@ -48,7 +48,7 @@ final class Settings: ObservableObject {
     @Published var customDnsServer: String {
         didSet {
             let trimmed = customDnsServer.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard isValidDnsServer(trimmed) else { return }
+            guard Self.isValidDnsServer(trimmed) else { return }
             defaults.set(trimmed, forKey: Key.customDnsServer)
         }
     }
@@ -56,7 +56,7 @@ final class Settings: ObservableObject {
     var effectiveCustomDnsServer: String? {
         guard customDnsEnabled else { return nil }
         let value = customDnsServer
-        return isValidDnsServer(value) ? value : nil
+        return Self.isValidDnsServer(value) ? value : nil
     }
 
     /// Equivalent of `proxyOnlyMode`: runs the SOCKS5 gateway without raising a system tunnel.
@@ -74,14 +74,14 @@ final class Settings: ObservableObject {
             let normalized = customEdgeAddress
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
-            guard isValidEdgeHost(normalized) || normalized.isEmpty else { return }
+            guard Self.isValidEdgeHost(normalized) || normalized.isEmpty else { return }
             defaults.set(normalized, forKey: Key.customEdgeAddress)
         }
     }
 
     var effectiveCustomEdgeAddress: String? {
         let value = customEdgeAddress
-        guard !value.isEmpty, isValidEdgeHost(value) else { return nil }
+        guard !value.isEmpty, Self.isValidEdgeHost(value) else { return nil }
         return value
     }
 
