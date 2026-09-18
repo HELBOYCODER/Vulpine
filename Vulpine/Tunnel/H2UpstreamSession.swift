@@ -166,7 +166,7 @@ final class H2UpstreamSession {
     }
 
     private func processFrames() {
-        while let frame = try? decoder.nextFrame(), let frame {
+        while let frame = (try? decoder.nextFrame()).flatMap({ $0 }) {
             switch frame.type {
             case .settings:
                 if !frame.flags.contains(.ack) {

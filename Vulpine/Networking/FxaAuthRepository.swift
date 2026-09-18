@@ -249,7 +249,7 @@ final class FxaAuthRepository: ObservableObject {
     ) async throws -> [String: Any] {
         let url = fxaAuthServer + path
         guard let urlObject = URL(string: url),
-              var components = URLComponents(url: urlObject, resolvingAgainstBaseURL: false)
+              let components = URLComponents(url: urlObject, resolvingAgainstBaseURL: false)
         else { throw AppError.transport("Invalid FxA URL: \(url)") }
 
         let bodyBytes = (try? JSONSerialization.data(withJSONObject: jsonBody)) ?? Data()
@@ -267,7 +267,7 @@ final class FxaAuthRepository: ObservableObject {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue(mozillaVpnUserAgent, forHTTPHeaderField: "User-Agent")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
-            if let sessionToken, let tokenId, let hmacKey {
+            if let _, let tokenId, let hmacKey {
                 request.setValue(
                     hawkHeader(
                         method: method,
