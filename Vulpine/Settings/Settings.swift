@@ -5,6 +5,9 @@
 import Foundation
 import Combine
 
+// Alias for compatibility with FoxyVPN naming
+typealias SettingsStore = Settings
+
 final class Settings: ObservableObject {
     static let shared = Settings()
 

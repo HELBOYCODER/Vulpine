@@ -14,18 +14,8 @@ struct VulpineApp: App {
 
     var body: some Scene {
         WindowGroup {
-            Group {
-                if !hasCheckedSession {
-                    splashView
-                } else if isSignedIn {
-                    MainView()
-                } else {
-                    LoginView(auth: auth) {
-                        isSignedIn = true
-                    }
-                }
-            }
-            .onAppear(perform: checkSession)
+            contentView
+                .onAppear(perform: checkSession)
         }
         .windowResizability(.contentSize)
 
@@ -44,6 +34,19 @@ struct VulpineApp: App {
             Button("Quit Vulpine") {
                 tunnel.stop()
                 NSApplication.shared.terminate(nil)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var contentView: some View {
+        if !hasCheckedSession {
+            splashView
+        } else if isSignedIn {
+            MainView()
+        } else {
+            LoginView(auth: auth) {
+                isSignedIn = true
             }
         }
     }

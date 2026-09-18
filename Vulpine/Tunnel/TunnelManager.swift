@@ -130,11 +130,13 @@ final class TunnelManager: ObservableObject {
     private func startStatsTimer() {
         lastStats = socksServer?.readStats() ?? (0, 0)
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self, let socks = self.socksServer else { return }
-            let current = socks.readStats()
-            self.txRatePerSecond = max(0, current.tx - self.lastStats.tx)
-            self.rxRatePerSecond = max(0, current.rx - self.lastStats.rx)
-            self.lastStats = current
+            Task { @MainActor [weak self] in
+                guard let self, let socks = self.socksServer else { return }
+                let current = socks.readStats()
+                self.txRatePerSecond = max(0, current.tx - self.lastStats.tx)
+                self.rxRatePerSecond = max(0, current.rx - self.lastStats.rx)
+                self.lastStats = current
+            }
         }
     }
 

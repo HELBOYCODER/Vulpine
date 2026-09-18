@@ -5,6 +5,7 @@
 
 import Foundation
 import CommonCrypto
+import Combine
 
 private let fxaAuthServer = "https://api.accounts.firefox.com/v1"
 private let firefoxCclientId = "5882386c6d801776"
@@ -38,7 +39,7 @@ struct FxaRefreshFailure: Error {
     let permanent: Bool
 }
 
-final class FxaAuthRepository {
+final class FxaAuthRepository: ObservableObject {
     static let shared = FxaAuthRepository()
 
     private let tokenStore: TokenStore
