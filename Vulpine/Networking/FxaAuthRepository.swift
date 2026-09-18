@@ -66,7 +66,7 @@ final class FxaAuthRepository: ObservableObject {
         pendingSessionToken = sessionToken
         let verified = data.bool("verified")
         if !verified { return true }
-        try completeLogin(sessionToken: sessionToken)
+        try await completeLogin(sessionToken: sessionToken)
         return false
     }
 
@@ -78,7 +78,7 @@ final class FxaAuthRepository: ObservableObject {
         }
         let body = ["code": code]
         _ = try await fxaDo("POST", path: "/session/verify_code", sessionToken: sessionToken, jsonBody: body)
-        try completeLogin(sessionToken: sessionToken)
+        try await completeLogin(sessionToken: sessionToken)
         return false
     }
 
@@ -198,7 +198,7 @@ final class FxaAuthRepository: ObservableObject {
 
     // MARK: - Internals
 
-    private func completeLogin(sessionToken: String) throws {
+    private func completeLogin(sessionToken: String) async throws {
         let tokenData = try await fxaDo(
             "POST",
             path: "/oauth/token",
@@ -210,7 +210,7 @@ final class FxaAuthRepository: ObservableObject {
                 "access_type": "offline",
             ]
         )
-        try tokenStore.saveAuth(
+        tokenStore.saveAuth(
             RuntimeAuth(
                 accessToken: tokenData.string("access_token"),
                 refreshToken: tokenData.string("refresh_token").isEmpty ? nil : tokenData.string("refresh_token"),
@@ -267,7 +267,7 @@ final class FxaAuthRepository: ObservableObject {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue(mozillaVpnUserAgent, forHTTPHeaderField: "User-Agent")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
-            if let _, let tokenId, let hmacKey {
+            if tokenId != nil, let tokenId, let hmacKey {
                 request.setValue(
                     hawkHeader(
                         method: method,
