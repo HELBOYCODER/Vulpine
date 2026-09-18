@@ -118,6 +118,45 @@ enum DohProvider: String, CaseIterable, Sendable {
         case .off: return []
         }
     }
+
+    /// DNS-over-HTTPS endpoints (RFC 8484). IP-literal URLs are used on purpose: the whole
+    /// point is to resolve Mozilla's edge hostnames when the system resolver is broken or
+    /// filtered, so the DoH endpoint itself must not depend on that resolver.
+    var dohEndpoints: [String] {
+        switch self {
+        case .automatic:
+            return ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query", "https://9.9.9.9/dns-query"]
+        case .cloudflare:
+            return ["https://1.1.1.1/dns-query", "https://1.0.0.1/dns-query"]
+        case .google:
+            return ["https://8.8.8.8/dns-query", "https://8.8.4.4/dns-query"]
+        case .quad9:
+            return ["https://9.9.9.9/dns-query"]
+        case .off:
+            return []
+        }
+    }
+}
+
+/// An upstream proxy the tunnel should be dialled through. Mirrors FoxyVPN's
+/// `UpstreamProxyConfig`. Applied with `NWParameters.PrivacyContext.proxyConfigurations`
+/// (macOS 14+), which chains the TCP *and* the TLS handshake through the proxy exactly like
+/// Netty's proxy handler does on Android.
+struct UpstreamProxySetting: Sendable, Equatable {
+    let type: UpstreamProxyType
+    let host: String
+    let port: Int
+    let username: String
+    let password: String
+
+    var isUsable: Bool { !host.trimmingCharacters(in: .whitespaces).isEmpty && (1...65_535).contains(port) }
+}
+
+/// Why a single candidate edge could not be dialled — surfaced in the log so a "cannot
+/// connect" failure names the actual cause instead of just the last error string.
+struct EdgeDialFailure: Sendable {
+    let authority: String
+    let reason: String
 }
 
 /// Server-list helpers mirroring ServerListClient.kt's companion object.

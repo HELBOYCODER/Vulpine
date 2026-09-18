@@ -43,7 +43,7 @@ It is a complete, from-scratch macOS port of [FoxyVPN](https://github.com/Vauth/
 - **Menu Bar Companion:** Live status indicator in the macOS menu bar with instant Connect/Disconnect toggling without opening the main window.
 - **Direct HTTP/2 Multiplexed Tunnel:** Zero external runtime dependencies. Implements RFC 9113 HTTP/2 framing and RFC 7541 HPACK header compression natively over Apple's `Network.framework` with ALPN `h2`.
 - **Fastly Edge Integration:** Carries all outbound TCP streams over `CONNECT` requests authenticated with Mozilla Guardian bearer tokens.
-- **Local SOCKS5 Bridge:** High-performance local SOCKS5 server listening on `127.0.0.1:10808` (configurable), allowing system-wide routing or proxying specific apps (browsers, Telegram, terminals).
+- **Local SOCKS5 Bridge:** High-performance local SOCKS5 server listening on `127.0.0.1:1080` (configurable), allowing system-wide routing or proxying specific apps (browsers, Telegram, terminals).
 - **macOS System Proxy Automation:** Optional 1-click **Proxy-Only Mode** automatically applies and removes system SOCKS settings via `networksetup`.
 - **Mozilla Remote Settings Server List:** Dynamically pulls the official, up-to-date catalog of Firefox VPN exit nodes across dozens of countries and cities.
 - **Secure Keychain Storage:** Session tokens and authentication keys are stored exclusively in the macOS Keychain (`Security.framework`). No plain-text files.
@@ -126,7 +126,7 @@ swift run Vulpine
 - **طراحی کاملاً بومی برای مک:** ساخته‌شده به طور اختصاصی با SwiftUI و هماهنگ با طراحی مدرن macOS Ventura، Sonoma و Sequoia، همراه با پشتیبانی کامل از تم روشن (Light) و تاریک (Dark).
 - **آیکون کنترل در Menu Bar مک:** امکان مشاهده وضعیت اتصال و قطع/وصل سریع از منوبار بالای مک بدون نیاز به باز کردن پنجره اصلی.
 - **موتور تونل اختصاصی HTTP/2:** بدون هیچ پیش‌نیاز یا وابستگی خارجی سنگین؛ پیاده‌سازی بومی فریم‌های RFC 9113 و فشرده‌سازی هدر HPACK (RFC 7541) بر روی `Network.framework` اپل با ALPN بومی `h2`.
-- **پل SOCKS5 محلی:** سرور SOCKS5 بومی روی آدرس `127.0.0.1:10808` با قابلیت تنظیم پورت برای تونل کردن کل ترافیک سیستم یا برنامه‌های خاص (مرورگرها، تلگرام، ترمینال و ...).
+- **پل SOCKS5 محلی:** سرور SOCKS5 بومی روی آدرس `127.0.0.1:1080` با قابلیت تنظیم پورت برای تونل کردن کل ترافیک سیستم یا برنامه‌های خاص (مرورگرها، تلگرام، ترمینال و ...).
 - **حالت خودکار پروکسی سیستم (Proxy-Only Mode):** اعمال و حذف خودکار تنظیمات پروکسی شبکه مک با یک کلیک از طریق ابزار سیستمی `networksetup`.
 - **دریافت پویای سرورهای موزیلا:** اتصال مستقیم به سرویس Remote Settings فایرفاکس جهت دریافت تازه‌ترین فهرست سرورها در ده‌ها کشور و شهر مختلف دنیا.
 - **ذخیره‌سازی امن در Keychain:** نگهداری توکن‌ها و نشست‌ها درون Keychain اختصاصی macOS با امنیت سخت‌افزاری، بدون ذخیره‌سازی متن خام در فایل‌ها.
@@ -177,6 +177,27 @@ swift run Vulpine
 5. ارتباط شما برقرار است و ترافیک با سرعت بالا و امنیت کامل ردوبدل می‌شود.
 
 ---
+## 🔧 Troubleshooting / عیب‌یابی
+
+### English
+
+- **"Cannot reach edge … network error 61"** — TCP port **2499** to `*.m1.fastly-masque.net` is blocked on your network. Vulpine automatically retries the same edge on **443** and then moves on to the next location, but if your network blocks both ports no location can connect. Try another network (mobile hotspot) or pick a different location.
+- **"Upstream edge rejected CONNECT … (HTTP 401/403)"** — the Guardian proxy pass was rejected. Sign out and sign in again.
+- **"Upstream edge rejected CONNECT … (HTTP 405)"** — the edge answered but refuses CONNECT on that port; Vulpine skips it automatically.
+- **"HTTP 429"** — the monthly traffic allowance (50 GB) is used up; it resets automatically.
+- Use **Settings → View Logs** for the full per-candidate, per-port failure log. Every connect attempt is logged with the exact host, port and reason.
+- Make sure **Settings → Connection → Configure macOS system proxy** is on if you want all apps to use the tunnel; otherwise only apps pointed at the local SOCKS5 bridge (`127.0.0.1:1080`) are tunneled.
+
+### فارسی
+
+- **«Cannot reach edge … network error 61»** — پورت **2499** به سرورهای `*.m1.fastly-masque.net` روی شبکه‌ی شما بسته است. برنامه به‌صورت خودکار همان سرور را روی پورت **443** هم امتحان می‌کند و بعد سراغ لوکیشن بعدی می‌رود؛ اما اگر شبکه‌ی شما هر دو پورت را مسدود کرده باشد، هیچ لوکیشنی وصل نمی‌شود. یک شبکه‌ی دیگر (مثلاً هات‌اسپات موبایل) یا لوکیشن دیگری را امتحان کنید.
+- **«HTTP 401/403»** — توکن Guardian رد شده؛ از برنامه خارج و دوباره وارد شوید.
+- **«HTTP 405»** — سرور پاسخ داده ولی CONNECT را روی آن پورت قبول نمی‌کند؛ برنامه به‌صورت خودکار سراغ گزینه‌ی بعدی می‌رود.
+- **«HTTP 429»** — سهمیه‌ی ماهانه (۵۰ گیگابایت) تمام شده و به‌صورت خودکار تمدید می‌شود.
+- برای دیدن لاگ کاملِ هر تلاش (هاست، پورت و دلیل خطا) به **Settings → View Logs** بروید.
+- اگر می‌خواهید همه‌ی برنامه‌ها از تونل عبور کنند، گزینه‌ی **Configure macOS system proxy** را در Settings → Connection روشن کنید؛ در غیر این صورت فقط برنامه‌هایی که به `127.0.0.1:1080` وصل شده‌اند تونل می‌شوند.
+
+
 
 ## ⚖️ License / لایسنس
 

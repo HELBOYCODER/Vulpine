@@ -15,8 +15,8 @@ enum GuardianClient {
     /// `GuardianClient.fetchProxyPass(...)` parity.
     static func fetchProxyPass(endpoint: String, accessToken: String) async throws -> ProxyPass {
         let url = "\(endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/api/v1/fpn/token"
-        let (status, text) = try await sendAuthorized("GET", url: url, accessToken: accessToken, body: nil)
-        switch status {
+        let response = try await sendAuthorized("GET", url: url, accessToken: accessToken, body: nil)
+        switch response.statusCode {
         case 401, 403:
             throw AppError.tokenInvalid
         case 429:
@@ -24,10 +24,10 @@ enum GuardianClient {
         default:
             break
         }
-        guard status == 200 else {
-            throw AppError.http(status: status, body: String(text.prefix(2048)))
+        guard response.statusCode == 200 else {
+            throw AppError.http(status: response.statusCode, body: String(response.body.prefix(2048)))
         }
-        let body = try text.asJSON()
+        let body = try response.body.asJSON()
         let token = body.string("token")
         guard !token.isEmpty else {
             throw GuardianError(message: "proxy pass response did not contain a token")
@@ -36,20 +36,49 @@ enum GuardianClient {
         return ProxyPass(
             token: token,
             expiresAtEpochSeconds: explicitExpiry ?? JWT.expiryEpochSeconds(token),
-            quotaMax: nil,
-            quotaRemaining: nil,
-            quotaReset: nil
+            quotaMax: response.headerInt64("X-Quota-Limit"),
+            quotaRemaining: response.headerInt64("X-Quota-Remaining"),
+            quotaReset: response.headerInt64("X-Quota-Reset")
         )
     }
+
+    /// The whole "get me a proxy pass" sequence, including the enrolment step that the
+    /// Android client performs in `FoxyVpnService.mintProxyPass()`:
+    ///
+    ///   fetchProxyPass -> (401/403) -> activateGuardian -> fetchProxyPass
+    ///
+    /// `activateGuardian` is what enrols a Firefox account in the free (limited-bandwidth)
+    /// Guardian plan. Without it a fresh/free account is rejected with 401 and the tunnel can
+    /// never come up — v1.1.0 shipped `activateGuardian` but never called it, so every free
+    /// account failed at the very first step with "Firefox rejected the saved session".
+    static func mintProxyPass(endpoint: String, accessToken: String) async throws -> ProxyPass {
+        do {
+            return try await fetchProxyPass(endpoint: endpoint, accessToken: accessToken)
+        } catch AppError.tokenInvalid {
+            await AppLog.shared.warn(
+                "Guardian",
+                "proxy pass was rejected; activating the Guardian entitlement for this account and retrying"
+            )
+            let entitlement = try await activateGuardian(endpoint: endpoint, accessToken: accessToken)
+            await AppLog.shared.info(
+                "Guardian",
+                "entitlement activated: subscribed=\(entitlement.subscribed) "
+                    + "limitedBandwidth=\(entitlement.limitedBandwidth) "
+                    + "maxBytes=\(entitlement.maxBytes.map(String.init) ?? "unlimited")"
+            )
+            return try await fetchProxyPass(endpoint: endpoint, accessToken: accessToken)
+        }
+    }
+
 
     /// `GuardianClient.fetchUserInfo(...)` parity.
     static func fetchUserInfo(endpoint: String, accessToken: String) async throws -> Entitlement {
         let url = "\(endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/api/v1/fpn/status"
-        let (status, text) = try await sendAuthorized("GET", url: url, accessToken: accessToken, body: nil)
-        guard status == 200 else {
-            throw AppError.http(status: status, body: String(text.prefix(2048)))
+        let response = try await sendAuthorized("GET", url: url, accessToken: accessToken, body: nil)
+        guard response.statusCode == 200 else {
+            throw AppError.http(status: response.statusCode, body: String(response.body.prefix(2048)))
         }
-        let entitlement = try parseEntitlement(text.asJSON())
+        let entitlement = try parseEntitlement(response.body.asJSON())
         guard entitlement.limitedBandwidth else { return entitlement }
         let pass = try? await fetchProxyPass(endpoint: endpoint, accessToken: accessToken)
         return entitlement.copyingQuotaRemaining(pass?.quotaRemaining)
@@ -58,11 +87,11 @@ enum GuardianClient {
     /// `GuardianClient.activateGuardian(...)` parity.
     static func activateGuardian(endpoint: String, accessToken: String) async throws -> Entitlement {
         let url = "\(endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/api/v1/fpn/activate"
-        let (status, text) = try await sendAuthorized("POST", url: url, accessToken: accessToken, body: Data())
-        guard status == 200 else {
-            throw AppError.http(status: status, body: String(text.prefix(2048)))
+        let response = try await sendAuthorized("POST", url: url, accessToken: accessToken, body: Data())
+        guard response.statusCode == 200 else {
+            throw AppError.http(status: response.statusCode, body: String(response.body.prefix(2048)))
         }
-        return try parseEntitlement(text.asJSON())
+        return try parseEntitlement(response.body.asJSON())
     }
 
     private static func parseEntitlement(_ body: [String: Any]) throws -> Entitlement {
@@ -82,9 +111,9 @@ enum GuardianClient {
         url: String,
         accessToken: String,
         body: Data?
-    ) async throws -> (statusCode: Int, body: String) {
-        func attempt() async throws -> (statusCode: Int, body: String) {
-            try await HTTPClient.send(
+    ) async throws -> HTTPResponse {
+        func attempt() async throws -> HTTPResponse {
+            try await HTTPClient.sendDetailed(
                 method,
                 url: url,
                 body: body,

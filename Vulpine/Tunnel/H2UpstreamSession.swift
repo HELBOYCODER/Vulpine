@@ -19,14 +19,25 @@ enum UpstreamError: LocalizedError {
     case unauthenticated
     case streamClosed
     case sessionDead
+    /// The TLS/TCP transport to the edge never came up (port blocked, DNS, reset...).
+    case unreachable(String)
 
     var errorDescription: String? {
         switch self {
-        case .rejected(let status, let auth): return "Upstream edge rejected CONNECT \(auth) (HTTP \(status))"
+        case .rejected(let status, let auth):
+            let hint: String
+            switch status {
+            case 405: hint = " — the edge is reachable but refuses CONNECT on this port"
+            case 401, 403: hint = " — the proxy pass was rejected; sign in again"
+            case 407: hint = " — the edge requires proxy authentication"
+            default: hint = ""
+            }
+            return "Upstream edge rejected CONNECT \(auth) (HTTP \(status))\(hint)"
         case .timeout(let auth): return "Timeout connecting to \(auth) via upstream edge"
         case .unauthenticated: return "Upstream session unauthenticated"
         case .streamClosed: return "Stream closed"
         case .sessionDead: return "Upstream session is closed or dead"
+        case .unreachable(let message): return "Cannot reach \(message)"
         }
     }
 }
@@ -57,12 +68,27 @@ final class H2UpstreamSession {
     let edgeHost: String
     let edgePort: Int
     private var bearerToken: String
-    private let customDnsServer: String?
+    /// DNS-over-HTTPS endpoints used to resolve `edgeHost` when the system resolver is poisoned
+    /// or blocked. Empty means "use the system resolver".
+    private let dohEndpoints: [String]
+    /// Explicit address (hostname or IP) to dial instead of resolving `edgeHost`. macOS port of
+    /// FoxyVPN's `edgeAddress`: the TLS handshake and certificate check still target `edgeHost`.
+    private let edgeAddressOverride: String?
+    /// Optional upstream proxy that both the TCP connect and the TLS handshake are chained
+    /// through (macOS 14+). Mirrors FoxyVPN's `upstreamProxy`.
+    private let upstreamProxy: UpstreamProxySetting?
+
+    /// Address actually handed to Network.framework — surfaced for logs/diagnostics.
+    private(set) var dialTargetDescription = ""
 
     private var connection: NWConnection?
     private let decoder = HTTP2FrameDecoder()
     private let hpackDecoder = HPACKDecoder()
     private let queue = DispatchQueue(label: "app.vulpine.h2", qos: .userInitiated)
+
+    /// Seconds Network.framework is allowed to spend on the TCP connect before giving up, so a
+    /// filtered/blackholed edge fails fast and the next candidate can be tried.
+    private static let tcpConnectTimeoutSeconds = 8
 
     private var nextStreamId: Int32 = 1
     private var streams: [Int32: H2Stream] = [:]
@@ -79,11 +105,20 @@ final class H2UpstreamSession {
 
     var onSessionDead: (() -> Void)?
 
-    init(edgeHost: String, edgePort: Int, bearerToken: String, customDnsServer: String? = nil) {
+    init(
+        edgeHost: String,
+        edgePort: Int,
+        bearerToken: String,
+        dohEndpoints: [String] = [],
+        edgeAddressOverride: String? = nil,
+        upstreamProxy: UpstreamProxySetting? = nil
+    ) {
         self.edgeHost = edgeHost
         self.edgePort = edgePort
         self.bearerToken = bearerToken
-        self.customDnsServer = customDnsServer
+        self.dohEndpoints = dohEndpoints
+        self.edgeAddressOverride = edgeAddressOverride
+        self.upstreamProxy = upstreamProxy
     }
 
     func updateBearerToken(_ token: String) {
@@ -91,21 +126,68 @@ final class H2UpstreamSession {
     }
 
     func connect() async throws {
+        // Resolve the dial address *before* entering the session queue: the DoH round trip is
+        // async and must not block the serialised frame-processing queue.
+        let target = await resolveDialTarget()
+
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async {
-                self.startConnection(continuation)
+                self.startConnection(continuation, dialTarget: target)
             }
         }
     }
 
-    private func startConnection(_ continuation: CheckedContinuation<Void, Error>) {
+    /// Decides where the TCP connection is opened.
+    ///
+    /// 1. An explicit edge address (Settings → "custom edge address") wins, so a user can pin a
+    ///    known-good Fastly IP when the hostname is blocked or resolves badly.
+    /// 2. Otherwise the edge hostname is resolved over DNS-over-HTTPS (RFC 8484), which keeps
+    ///    working when the local resolver is poisoned or filtered.
+    /// 3. Otherwise Network.framework resolves the hostname with the system resolver.
+    private func resolveDialTarget() async -> (host: String, pinServerName: Bool, detail: String) {
+        let override = edgeAddressOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !override.isEmpty {
+            let isLiteral = DohResolver.isAddressLiteral(override)
+            return (override, isLiteral, "custom edge address \(override) (TLS name \(edgeHost))")
+        }
+
+        if !dohEndpoints.isEmpty,
+           let address = await DohResolver.shared.preferredAddress(host: edgeHost, endpoints: dohEndpoints) {
+            return (address, true, "DoH \(edgeHost) -> \(address)")
+        }
+
+        return (edgeHost, false, "system resolver \(edgeHost)")
+    }
+
+    private func startConnection(
+        _ continuation: CheckedContinuation<Void, Error>,
+        dialTarget: (host: String, pinServerName: Bool, detail: String)
+    ) {
+        dialTargetDescription = dialTarget.detail
+
         let tlsParams = NWParameters.tls
         let tlsOptions = tlsParams.defaultProtocolStack.applicationProtocols[0] as! NWProtocolTLS.Options
         sec_protocol_options_add_tls_application_protocol(tlsOptions.securityProtocolOptions, "h2")
 
+        // Always verify the certificate against the real Mozilla edge name, even when we dial a
+        // raw IP for it (exactly what FoxyVPN does with its custom `edgeAddress`).
+        if dialTarget.pinServerName && dialTarget.host != edgeHost {
+            sec_protocol_options_set_tls_server_name(tlsOptions.securityProtocolOptions, edgeHost)
+        }
+
+        // Fail fast on a filtered/blackholed address, and keep the tunnel alive across NAT timeouts.
+        if let tcp = tlsParams.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            tcp.connectionTimeout = Self.tcpConnectTimeoutSeconds
+            tcp.noDelay = true
+            tcp.enableKeepalive = true
+            tcp.keepaliveIdle = 15
+        }
+
+        applyUpstreamProxy(to: tlsParams)
+
         let endpoint = NWEndpoint.hostPort(
-            host: NWEndpoint.Host(edgeHost),
-            port: NWEndpoint.Port(integerLiteral: UInt16(edgePort))
+            host: NWEndpoint.Host(dialTarget.host),
+            port: NWEndpoint.Port(integerLiteral: UInt16(clamping: edgePort))
         )
         let conn = NWConnection(to: endpoint, using: tlsParams)
         self.connection = conn
@@ -130,7 +212,15 @@ final class H2UpstreamSession {
                 self.startReading()
             case .failed(let err):
                 self.isConnected = false
-                resumeOnce(.failure(err))
+                let reason: String
+                switch err {
+                case .dns(let code): reason = "DNS error \(code)"
+                case .posix(let code): reason = "network error \(code.rawValue) (\(code))"
+                @unknown default: reason = "\(err)"
+                }
+                resumeOnce(.failure(
+                    UpstreamError.unreachable("edge \(self.edgeHost):\(self.edgePort) — \(reason)")
+                ))
                 self.handleDeath()
             case .cancelled:
                 self.isConnected = false
@@ -140,6 +230,51 @@ final class H2UpstreamSession {
             }
         }
         conn.start(queue: queue)
+    }
+
+    /// Chains the dial through the user's own proxy (Settings → "Connect through another
+    /// proxy"). Network.framework performs the TCP connect *and* the TLS handshake through the
+    /// proxy, so the HTTP/2 tunnel itself is tunnelled instead of leaking around it — the same
+    /// effect as Netty's proxy handler on Android.
+    private func applyUpstreamProxy(to tlsParams: NWParameters) {
+        guard let proxy = upstreamProxy, proxy.isUsable else { return }
+
+        guard #available(macOS 14.0, *) else {
+            Task {
+                await AppLog.shared.warn(
+                    "H2",
+                    "upstream proxy chaining needs macOS 14 or newer; dialling the edge directly instead"
+                )
+            }
+            return
+        }
+
+        let hop = NWEndpoint.hostPort(
+            host: NWEndpoint.Host(proxy.host),
+            port: NWEndpoint.Port(integerLiteral: UInt16(clamping: proxy.port))
+        )
+        var configuration: ProxyConfiguration
+        switch proxy.type {
+        case .socks5: configuration = ProxyConfiguration(socksv5Proxy: hop)
+        case .http: configuration = ProxyConfiguration(httpCONNECTProxy: hop)
+        }
+        if !proxy.username.isEmpty {
+            configuration.applyCredential(username: proxy.username, password: proxy.password)
+        }
+        // Never let the OS quietly fall back to a direct connection: on a filtered network the
+        // direct path is precisely the one that does not work.
+        configuration.allowFailover = false
+
+        let context = NWParameters.PrivacyContext(description: "vulpine-upstream-proxy")
+        context.proxyConfigurations = [configuration]
+        tlsParams.setPrivacyContext(context)
+
+        Task {
+            await AppLog.shared.info(
+                "H2",
+                "dialling the edge through \(proxy.type.rawValue.uppercased()) proxy \(proxy.host):\(proxy.port)"
+            )
+        }
     }
 
     private func sendConnectionPreface() {
@@ -263,6 +398,16 @@ final class H2UpstreamSession {
         }
         for header in headers {
             if header.name == ":status", let status = Int(header.value) {
+                if !(200..<300).contains(status) {
+                    // Keep the edge's answer visible in the log — this is what tells a blocked
+                    // port apart from a rejected proxy pass or a port without proxy support.
+                    let extra = headers
+                        .filter { !$0.name.hasPrefix(":") && $0.name != "date" }
+                        .prefix(4)
+                        .map { "\($0.name): \($0.value)" }
+                        .joined(separator: "; ")
+                    Task { await AppLog.shared.warn("H2", "edge answered HTTP \(status) for \(stream.targetAuthority)\(extra.isEmpty ? "" : " — \(extra)")") }
+                }
                 stream.onConnected?(status)
                 return
             }

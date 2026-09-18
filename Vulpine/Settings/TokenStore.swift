@@ -15,13 +15,25 @@ final class TokenStore {
     private static let clockSkewToleranceSeconds: Int64 = 60
 
     func saveAuth(_ auth: RuntimeAuth) {
-        try? Keychain.set(auth.accessToken, key: Key.accessToken)
+        do {
+            try Keychain.set(auth.accessToken, key: Key.accessToken)
+        } catch {
+            Task { @MainActor in AppLog.shared.error("TokenStore", "could not store the access token in the Keychain", error: error) }
+        }
         if let refresh = auth.refreshToken {
-            try? Keychain.set(refresh, key: Key.refreshToken)
+            do {
+                try Keychain.set(refresh, key: Key.refreshToken)
+            } catch {
+                Task { @MainActor in AppLog.shared.error("TokenStore", "could not store the refresh token in the Keychain", error: error) }
+            }
         } else {
             Keychain.remove(Key.refreshToken)
         }
-        try? Keychain.set(String(auth.expiresAtEpochSeconds), key: Key.expiresAt)
+        do {
+            try Keychain.set(String(auth.expiresAtEpochSeconds), key: Key.expiresAt)
+        } catch {
+            Task { @MainActor in AppLog.shared.error("TokenStore", "could not store the token expiry in the Keychain", error: error) }
+        }
     }
 
     func loadAuth() -> RuntimeAuth? {

@@ -34,6 +34,20 @@ enum AppError: LocalizedError {
     }
 }
 
+/// Full HTTP response, headers included. Guardian reports the free-plan quota in
+/// `X-Quota-Limit` / `X-Quota-Remaining` / `X-Quota-Reset`, so the raw headers are needed
+/// to show real numbers instead of a hard-coded guess.
+struct HTTPResponse {
+    let statusCode: Int
+    let headers: [String: String]
+    let body: String
+
+    /// Case-insensitive header lookup (URLSession already lowercases, this keeps callers safe).
+    func header(_ name: String) -> String? { headers[name.lowercased()] }
+
+    func headerInt64(_ name: String) -> Int64? { header(name).flatMap { Int64($0) } }
+}
+
 /// Custom-session URLSession delegate so every request can bypass the active tunnel.
 final class DirectNetworkDelegate: NSObject, URLSessionDelegate {
     static let shared = DirectNetworkDelegate()
@@ -76,6 +90,30 @@ enum HTTPClient {
         additionalHeaders: [String: String] = [:],
         session: URLSession = HTTPClient.shared
     ) async throws -> (statusCode: Int, body: String) {
+        let response = try await sendDetailed(
+            method,
+            url: url,
+            body: body,
+            contentType: contentType,
+            authorization: authorization,
+            customUserAgent: customUserAgent,
+            additionalHeaders: additionalHeaders,
+            session: session
+        )
+        return (response.statusCode, response.body)
+    }
+
+    /// Same as `send(...)` but keeps the response headers, which Guardian uses for quota reporting.
+    static func sendDetailed(
+        _ method: String,
+        url: String,
+        body: Data? = nil,
+        contentType: String = "application/json",
+        authorization: String? = nil,
+        customUserAgent: String? = nil,
+        additionalHeaders: [String: String] = [:],
+        session: URLSession = HTTPClient.shared
+    ) async throws -> HTTPResponse {
         guard let request = makeRequest(
             method: method,
             url: url,
@@ -93,8 +131,13 @@ enum HTTPClient {
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw AppError.transport("Non-HTTP response from \(url)")
             }
+            var headers: [String: String] = [:]
+            for (key, value) in httpResponse.allHeaderFields {
+                guard let key = key as? String else { continue }
+                headers[key.lowercased()] = String(describing: value)
+            }
             let text = String(data: data, encoding: .utf8) ?? ""
-            return (httpResponse.statusCode, text)
+            return HTTPResponse(statusCode: httpResponse.statusCode, headers: headers, body: text)
         } catch let error as AppError {
             throw error
         } catch let error as URLError where error.code == .cancelled {

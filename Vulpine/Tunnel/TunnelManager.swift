@@ -31,6 +31,12 @@ final class TunnelManager: ObservableObject {
     @Published private(set) var exitInfo: TunnelExitInfo?
     @Published private(set) var rxRatePerSecond: Int64 = 0
     @Published private(set) var txRatePerSecond: Int64 = 0
+    /// Per-server dial failures from the most recent attempt — lets the UI explain *why* a
+    /// connection failed instead of showing one opaque error string.
+    @Published private(set) var dialDiagnostics: [EdgeDialFailure] = []
+
+    /// How many edge servers to try before giving up on a connect attempt.
+    private static let maxCandidateAttempts = 5
 
     private var activeSession: H2UpstreamSession?
     private var socksServer: LocalSocks5Server?
@@ -112,9 +118,10 @@ final class TunnelManager: ObservableObject {
             accessToken = token
         }
 
-        // Step 2: Fetch a proxy pass from Guardian.
+        // Step 2: Fetch a proxy pass from Guardian — activating the (free) entitlement first
+        // when the account has never been enrolled, otherwise fresh accounts always get 401.
         await AppLog.shared.info("Tunnel", "fetching proxy pass from Guardian...")
-        let pass = try await GuardianClient.fetchProxyPass(endpoint: guardianEndpointDefault, accessToken: accessToken)
+        let pass = try await GuardianClient.mintProxyPass(endpoint: guardianEndpointDefault, accessToken: accessToken)
 
         // Step 3: Collect candidate edge nodes — the saved selection first, then the rest.
         let candidates = try await resolveCandidates()
@@ -124,7 +131,8 @@ final class TunnelManager: ObservableObject {
 
         // Step 4: Try candidates until one passes the end-to-end exit check.
         var lastError: Error = AppError.transport("No working edge server found")
-        for candidate in candidates.prefix(5) {
+        let savedAuthority = proxyStore.selectedProxy?.authority
+        for candidate in candidates.prefix(6) {
             guard gen == self.generation else { return }
             do {
                 try await connectToEdge(candidate, passToken: pass.token)
@@ -137,19 +145,53 @@ final class TunnelManager: ObservableObject {
                 await AppLog.shared.warn("Tunnel", "candidate \(candidate.authority) failed", error: error)
                 lastError = error
                 teardownSession()
+                // Retiring a dead saved location matters: it is always tried first, so without
+                // this the app would keep paying for a server that no longer works.
+                if candidate.authority == savedAuthority {
+                    let result = proxyStore.recordFailure()
+                    if result.shouldDiscard {
+                        await AppLog.shared.warn("Tunnel", "saved location \(candidate.authority) discarded after \(result.failures) failures")
+                    }
+                }
+            }
+        }
+        throw AppError.transport(
+            "\(lastError.localizedDescription). Firefox VPN edges listen on TCP 2499 "
+                + "(443 is tried as a fallback). If your network blocks both, no location can connect — "
+                + "try another location or a different network."
+        )
+    }
+
+    private func connectToEdge(_ candidate: ProxyCandidate, passToken: String) async throws {
+        // Protocol port first (2499), then 443. Some networks only pass 443 and some Fastly
+        // POPs answer the proxy on both; a failed port costs at most one quick round trip.
+        var ports = [candidate.port]
+        if candidate.port != 443 { ports.append(443) }
+
+        var lastError: Error = AppError.transport("no usable port on \(candidate.host)")
+        for port in ports {
+            do {
+                try await connectToEdgePort(candidate, port: port, passToken: passToken)
+                return
+            } catch {
+                await AppLog.shared.warn("Tunnel", "\(candidate.host):\(port) failed", error: error)
+                lastError = error
+                teardownSession()
             }
         }
         throw lastError
     }
 
-    private func connectToEdge(_ candidate: ProxyCandidate, passToken: String) async throws {
+    private func connectToEdgePort(_ candidate: ProxyCandidate, port: Int, passToken: String) async throws {
         // Start the HTTP/2 session to the Fastly edge node.
-        await AppLog.shared.info("Tunnel", "connecting to edge \(candidate.authority)...")
+        await AppLog.shared.info("Tunnel", "connecting to edge \(candidate.host):\(port)...")
         let session = H2UpstreamSession(
             edgeHost: candidate.host,
-            edgePort: candidate.port,
+            edgePort: port,
             bearerToken: passToken,
-            customDnsServer: settings.effectiveCustomDnsServer
+            dohEndpoints: settings.dohEndpoints,
+            edgeAddressOverride: settings.effectiveCustomEdgeAddress,
+            upstreamProxy: settings.upstreamProxySetting
         )
         session.onSessionDead = { [weak self] in
             Task { @MainActor in

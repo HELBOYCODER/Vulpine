@@ -23,7 +23,7 @@ enum TunnelVerifier {
 
     /// Runs a full SOCKS5 handshake against the local bridge and fetches an HTTP page
     /// through the tunnel. Throws if any step fails or times out.
-    static func verify(socksPort: Int, timeout: TimeInterval = 10) async throws -> TunnelExitInfo {
+    static func verify(socksPort: Int, timeout: TimeInterval = 15) async throws -> TunnelExitInfo {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<TunnelExitInfo, Error>) in
             let state = VerificationState(continuation: continuation)
             let queue = DispatchQueue(label: "app.vulpine.verify", qos: .userInitiated)

@@ -13,6 +13,10 @@ import Network
 
 final class LocalSocks5Server {
     let port: Int
+    /// Address the bridge binds to. Loopback by default: v1.1.0 used `NWListener(using:on:)`
+    /// without a local endpoint, which listens on 0.0.0.0 and exposed the tunnel as an open
+    /// proxy to the entire local network.
+    let bindAddress: String
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "app.vulpine.socks5", qos: .userInitiated)
 
@@ -23,14 +27,17 @@ final class LocalSocks5Server {
     private var rxBytes: Int64 = 0
     private let lock = NSLock()
 
-    init(port: Int = 1080) {
+    init(port: Int = 1080, bindAddress: String = "127.0.0.1") {
         self.port = port
+        self.bindAddress = bindAddress
     }
 
     func start() throws {
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
-        let listener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: UInt16(port)))
+        let port = NWEndpoint.Port(integerLiteral: UInt16(clamping: self.port))
+        params.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(bindAddress), port: port)
+        let listener = try NWListener(using: params, on: port)
         self.listener = listener
 
         listener.newConnectionHandler = { [weak self] connection in
@@ -39,8 +46,9 @@ final class LocalSocks5Server {
         listener.stateUpdateHandler = { [weak self] state in
             switch state {
             case .ready:
+                let address = self?.bindAddress ?? "127.0.0.1"
                 let port = self?.port ?? 0
-                Task { await AppLog.shared.info("SOCKS5", "listening on 127.0.0.1:\(port)") }
+                Task { await AppLog.shared.info("SOCKS5", "listening on \(address):\(port)") }
             case .failed(let err):
                 Task { await AppLog.shared.error("SOCKS5", "listener failed", error: err) }
             default:

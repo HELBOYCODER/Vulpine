@@ -37,6 +37,38 @@ final class Settings: ObservableObject {
         didSet { defaults.set(socksPort.clamped(to: 1...65_535), forKey: Key.socksPort) }
     }
 
+    /// Address the local SOCKS5 bridge binds to. Loopback by default (v1.1.0 unintentionally
+    /// listened on 0.0.0.0, exposing the tunnel to the whole LAN). See `socksBindPresets`.
+    @Published var socksBindAddress: String {
+        didSet {
+            let trimmed = socksBindAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            defaults.set(trimmed, forKey: Key.socksBindAddress)
+        }
+    }
+
+    /// DoH endpoints (RFC 8484) used to resolve Mozilla's edge hostnames. An explicit custom DNS
+    /// server wins over the provider preset, matching the Android client's behaviour.
+    var dohEndpoints: [String] {
+        if customDnsEnabled, Self.isValidDnsServer(customDnsServer) {
+            return ["https://\(customDnsServer)/dns-query"]
+        }
+        return dohProvider.dohEndpoints
+    }
+
+    /// The upstream proxy to chain the tunnel through, or nil when disabled or incomplete.
+    var upstreamProxySetting: UpstreamProxySetting? {
+        guard upstreamProxyEnabled else { return nil }
+        let setting = UpstreamProxySetting(
+            type: upstreamProxyType,
+            host: upstreamProxyHost.trimmingCharacters(in: .whitespacesAndNewlines),
+            port: upstreamProxyPort,
+            username: upstreamProxyUsername,
+            password: upstreamProxyPassword
+        )
+        return setting.isUsable ? setting : nil
+    }
+
     @Published var dohProvider: DohProvider {
         didSet { defaults.set(dohProvider.rawValue, forKey: Key.dohProvider) }
     }
@@ -158,6 +190,7 @@ final class Settings: ObservableObject {
         themeMode = Settings.ThemeMode(rawValue: defaults.string(forKey: Key.themeMode) ?? "") ?? .system
         exitCheckEnabled = defaults.object(forKey: Key.exitCheck) as? Bool ?? true
         socksPort = defaults.object(forKey: Key.socksPort) as? Int ?? Settings.defaultSocksPort
+        socksBindAddress = defaults.string(forKey: Key.socksBindAddress) ?? Settings.defaultSocksBindAddress
         dohProvider = DohProvider(rawValue: defaults.string(forKey: Key.dohProvider) ?? "") ?? .automatic
         customDnsEnabled = defaults.object(forKey: Key.customDnsEnabled) as? Bool ?? false
         customDnsServer = defaults.string(forKey: Key.customDnsServer) ?? Settings.defaultCustomDnsServer
@@ -226,6 +259,7 @@ final class Settings: ObservableObject {
     // MARK: Constants (parity with SettingsStore.kt companion object)
 
     static let defaultSocksPort = 1080
+    static let defaultSocksBindAddress = "127.0.0.1"
     static let defaultUpstreamProxyPort = 1080
     static let defaultCustomDnsServer = "1.1.1.1"
 
@@ -248,6 +282,7 @@ final class Settings: ObservableObject {
         static let themeMode = "theme_mode"
         static let exitCheck = "exit_check_enabled"
         static let socksPort = "socks_port"
+        static let socksBindAddress = "socks_bind_address"
         static let dohProvider = "doh_provider"
         static let customDnsEnabled = "custom_dns_enabled"
         static let customDnsServer = "custom_dns_server"
