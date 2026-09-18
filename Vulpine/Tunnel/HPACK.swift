@@ -101,31 +101,28 @@ final class HPACKDecoder {
             let byte = data[index]
             index += 1
 
-            // Literal header field never indexed / without indexing share the "new name" shape.
-            if byte & 0xF0 == 0x00 || byte & 0xF0 == 0x10 || byte & 0xE0 == 0x20 {
+            // Literal header field (incremental indexing 01xxxxxx, without indexing 0000xxxx, never indexed 0001xxxx)
+            if (byte & 0xC0) == 0x40 || (byte & 0xF0) == 0x00 || (byte & 0xF0) == 0x10 {
                 let incremental = (byte & 0xC0) == 0x40
-                var nameIndex = Int(byte & 0x0F)
-                if nameIndex == 0 {
-                    let (name, consumed) = try readString(data, at: index)
-                    name = try lowercaseHeaderName(name)
-                    index = consumed
-                } else {
-                    nameIndex += index - 1 > 0 ? 0 : 0
-                }
+                let prefixBits = incremental ? 6 : 4
+                let (nameIndex, nextIndex) = try readInteger(data, at: index, prefixBits: prefixBits, firstByte: byte)
+                index = nextIndex
+
                 let name: String
-                if byte & 0x0F == 0 {
-                    let (raw, consumed) = try readString(data, at: index)
-                    name = raw.lowercased()
+                if nameIndex == 0 {
+                    let (rawName, consumed) = try readString(data, at: index)
+                    name = rawName.lowercased()
                     index = consumed
                 } else {
-                    name = try lookup(index: Int(byte & 0x0F)).name
+                    name = try lookup(index: nameIndex).name
                 }
-                let (value, consumed) = try readString(data, at: index)
-                index = consumed
+
+                let (value, valConsumed) = try readString(data, at: index)
+                index = valConsumed
+
                 let header = HPACKHeader(name: name, value: value)
                 headers.append(header)
                 if incremental { dynamicTable.insert(header) }
-                _ = nameIndex
                 continue
             }
 
@@ -186,7 +183,7 @@ final class HPACKDecoder {
         _ data: Data,
         at start: Int,
         prefixBits: Int,
-        firstByte: Byte?
+        firstByte: UInt8?
     ) throws -> (value: Int, nextIndex: Int) {
         let maxPrefix = (1 << prefixBits) - 1
         var value: Int

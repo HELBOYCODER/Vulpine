@@ -7,6 +7,7 @@
 
 import Foundation
 import Network
+import Security
 
 enum UpstreamError: LocalizedError {
     case rejected(statusCode: Int, authority: String)

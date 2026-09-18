@@ -1,0 +1,112 @@
+name: Build macOS DMG (arm64)
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release Tag (e.g. v1.0.0)'
+        required: false
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-mac:
+    name: Build Vulpine .dmg (Apple Silicon arm64)
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: System & Toolchain Info
+        run: |
+          echo "Architecture: $(uname -m)"
+          echo "macOS Version: $(sw_vers -productVersion)"
+          swift --version
+          xcodebuild -version
+
+      - name: Build Vulpine DMG
+        run: |
+          chmod +x scripts/build-dmg.sh
+          ./scripts/build-dmg.sh
+
+      - name: Verify DMG integrity
+        run: |
+          hdiutil imageinfo build/Vulpine-arm64.dmg
+          cat build/Vulpine-arm64.dmg.sha256
+
+      - name: Upload DMG Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vulpine-arm64-dmg
+          path: |
+            build/Vulpine-arm64.dmg
+            build/Vulpine-arm64.dmg.sha256
+          retention-days: 30
+
+      - name: Determine Tag
+        id: get_tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.release_tag }}" ]]; then
+            echo "tag=${{ github.event.inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v1.0.0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.get_tag.outputs.tag }}"
+          echo "Target tag: $TAG"
+
+          RELEASE_BODY=$(cat << 'EOF'
+          ## 🦊 Vulpine v1.0.0 (macOS Apple Silicon)
+          ### Native Unofficial Firefox VPN Client for Mac
+
+          ### 📦 Installation
+          1. Download `Vulpine-arm64.dmg` below.
+          2. Open the DMG and drag **Vulpine** into your **Applications** folder.
+          3. Launch Vulpine and sign in with your free Firefox account.
+          4. Select your preferred exit location and click Connect!
+
+          ### 🔑 Highlights
+          - **Architecture:** Native Apple Silicon (`arm64` - M1/M2/M3/M4)
+          - **OS Support:** macOS 13.0 Ventura, macOS 14 Sonoma, macOS 15 Sequoia
+          - **Traffic Allowance:** 50 GB / month free via Mozilla Guardian
+          - **Transport:** Native HTTP/2 multiplexed tunnel over Fastly Edge
+          - **Local SOCKS5 Bridge:** `127.0.0.1:10808`
+          - **Menu Bar Extra:** Instant connect/disconnect from system menu bar
+
+          ---
+
+          ### 🇮🇷 راهنمای نصب
+          ۱. فایل نصبی `Vulpine-arm64.dmg` را دانلود کنید.
+          ۲. فایل DMG را باز کرده و آیکون **Vulpine** را با ماوس به پوشه **Applications** بکشید.
+          ۳. برنامه را باز کرده، با حساب کاربری فایرفاکس خود لاگین کنید و لوکیشن دلخواه را انتخاب نمایید.
+          EOF
+          )
+
+          # If release exists, upload assets with clobber; otherwise create new release
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists, uploading assets..."
+            gh release upload "$TAG" build/Vulpine-arm64.dmg build/Vulpine-arm64.dmg.sha256 --clobber
+          else
+            echo "Creating release $TAG..."
+            gh release create "$TAG" \
+              build/Vulpine-arm64.dmg \
+              build/Vulpine-arm64.dmg.sha256 \
+              --title "Vulpine $TAG (macOS Apple Silicon arm64)" \
+              --notes "$RELEASE_BODY"
+          fi

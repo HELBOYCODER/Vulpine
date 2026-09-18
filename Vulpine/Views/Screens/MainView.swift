@@ -11,12 +11,12 @@ struct MainView: View {
 
     @State private var activeSheet: ActiveSheet?
 
-    enum ActiveSheet: Identifiable {
+    enum ActiveSheet: String, Identifiable {
         case serverList
         case settings
         case account
         case logs
-        var id: Int { hashValue }
+        var id: String { rawValue }
     }
 
     var body: some View {

@@ -5,11 +5,11 @@ import Foundation
 import CommonCrypto
 
 func sha256(_ data: Data) -> Data {
-    var digest = Data(count: Int(CC_SHA256_DIGEST_LENGTH))
+    var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
     data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
-        _ = CC_SHA256(ptr.baseAddress, CC_LONG(data.count), digest.mutableBytes)
+        _ = CC_SHA256(ptr.baseAddress, CC_LONG(data.count), &digest)
     }
-    return digest
+    return Data(digest)
 }
 
 func sha256(_ string: String) -> Data {
@@ -19,18 +19,18 @@ func sha256(_ string: String) -> Data {
 extension Data {
     /// HKDF-Extract as used by Mozilla's FxA / Guardian protocol family (RFC 5869, section 2.2).
     func hmacSha256(key: Data) -> Data {
-        var out = Data(count: Int(CC_SHA256_DIGEST_LENGTH))
+        var out = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
         self.withUnsafeBytes { (info: UnsafeRawBufferPointer) in
             key.withUnsafeBytes { (keyPtr: UnsafeRawBufferPointer) in
                 _ = CCHmac(
                     CCHmacAlgorithm(kCCHmacAlgSHA256),
                     keyPtr.baseAddress, key.count,
                     info.baseAddress, self.count,
-                    out.mutableBytes
+                    &out
                 )
             }
         }
-        return out
+        return Data(out)
     }
 
     /// Constant-time equality check for token / MAC comparisons.

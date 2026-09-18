@@ -12,7 +12,8 @@
 ![macOS](https://img.shields.io/badge/macOS-13.0%2B-000000?style=for-the-badge&logo=apple&logoColor=white)
 ![Swift](https://img.shields.io/badge/Swift-5.9%2B-F05138?style=for-the-badge&logo=swift&logoColor=white)
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-Native-0071e3?style=for-the-badge&logo=swift&logoColor=white)
-![HTTP/2](https://img.shields.io/badge/Tunnel-HTTP%2F2-green?style=for-the-badge)
+[![Release](https://img.shields.io/github/v/release/HELBOYCODER/Vulpine?style=for-the-badge&color=orange)](https://github.com/HELBOYCODER/Vulpine/releases/latest)
+[![Download DMG](https://img.shields.io/badge/Download-Vulpine--arm64.dmg-F05138?style=for-the-badge&logo=apple)](https://github.com/HELBOYCODER/Vulpine/releases/latest)
 ![License](https://img.shields.io/badge/License-MIT-black?style=for-the-badge)
 
 <br>
@@ -57,15 +58,22 @@ It is a complete, from-scratch macOS port of [FoxyVPN](https://github.com/Vauth/
 
 ### 🚀 Getting Started
 
-#### Option 1: Build from Source with Swift PM
+#### Option 1: Download Pre-built .dmg (Recommended)
+
+1. Head over to [**GitHub Releases**](https://github.com/HELBOYCODER/Vulpine/releases/latest).
+2. Download `Vulpine-arm64.dmg`.
+3. Double-click the DMG and drag **Vulpine** into your **Applications** folder.
+4. Launch Vulpine, sign in with your Firefox account, and connect!
+
+#### Option 2: Build from Source with Swift PM
 
 ```bash
 # 1. Clone the repository
 git clone https://github.com/HELBOYCODER/Vulpine.git
 cd Vulpine
 
-# 2. Build the release binary and bundle
-make build
+# 2. Build the DMG installer locally
+./scripts/build-dmg.sh
 
 # 3. Launch the app
 open build/Vulpine.app
@@ -133,15 +141,22 @@ swift run Vulpine
 
 ### 🚀 نحوه راه‌اندازی و استفاده
 
-#### روش اول: کامپایل و اجرای خودکار با Make
+#### روش اول: دانلود مستقیم فایل نصبی DMG (پیشنهادی)
+
+۱. به صفحه [**ریلیس‌های گیت‌هاب**](https://github.com/HELBOYCODER/Vulpine/releases/latest) بروید.  
+۲. فایل **`Vulpine-arm64.dmg`** مخصوص پردازنده‌های اپل سیلیکون را دانلود کنید.  
+۳. فایل DMG را باز کرده و آیکون **Vulpine** را به پوشه **Applications** بکشید.  
+۴. برنامه را باز کرده و پس از ورود به حساب فایرفاکس، روی دکمه اتصال کلیک کنید!
+
+#### روش دوم: کامپایل محلی از سورس با اسکریپت بیلد
 
 ```bash
 # ۱. دریافت ریپازیتوری
 git clone https://github.com/HELBOYCODER/Vulpine.git
 cd Vulpine
 
-# ۲. بیلد و ساخت فایل برنامه
-make build
+# ۲. بیلد و ساخت خودکار پکیج DMG
+./scripts/build-dmg.sh
 
 # ۳. اجرای برنامه
 open build/Vulpine.app

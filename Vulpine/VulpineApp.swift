@@ -3,6 +3,7 @@
 // Integrates standard window + Menu Bar extra item for fast toggling.
 
 import SwiftUI
+import AppKit
 
 @main
 struct VulpineApp: App {

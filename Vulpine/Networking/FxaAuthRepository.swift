@@ -394,18 +394,18 @@ final class FxaAuthRepository {
 // MARK: - Crypto primitives (hmacSha256 / hkdf / pbkdf2 parity)
 
 func hmacSha256(key: Data, data: Data) -> Data {
-    var out = Data(count: Int(CC_SHA256_DIGEST_LENGTH))
+    var out = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
     data.withUnsafeBytes { dataPtr in
         key.withUnsafeBytes { keyPtr in
-            _ = CCHmac(
+            CCHmac(
                 CCHmacAlgorithm(kCCHmacAlgSHA256),
                 keyPtr.baseAddress, key.count,
                 dataPtr.baseAddress, data.count,
-                out.mutableBytes
+                &out
             )
         }
     }
-    return out
+    return Data(out)
 }
 
 func hkdf(_ ikm: Data, info: String, length: Int, salt: Data = Data(count: 32)) -> Data {
@@ -431,35 +431,18 @@ func hkdf(_ ikm: Data, info: String, length: Int, salt: Data = Data(count: 32)) 
 }
 
 func pbkdf2HmacSha256(password: Data, salt: Data, iterations: Int, keyLengthBytes: Int) -> Data {
-    let hLen = Int(CC_SHA256_DIGEST_LENGTH)
-    let numBlocks = (keyLengthBytes + hLen - 1) / hLen
-    var result = Data(count: numBlocks * hLen)
-    let passwordBytes = password.bytes
-
-    for blockIndex in 1...numBlocks {
-        var u = salt
-        var blockIndexBytes = [UInt8](repeating: 0, count: 4)
-        blockIndexBytes[0] = UInt8((blockIndex >> 24) & 0xFF)
-        blockIndexBytes[1] = UInt8((blockIndex >> 16) & 0xFF)
-        blockIndexBytes[2] = UInt8((blockIndex >> 8) & 0xFF)
-        blockIndexBytes[3] = UInt8(blockIndex & 0xFF)
-        u.append(contentsOf: blockIndexBytes)
-
-        var t = Data(count: hLen)
-        var hmac = u
-        for _ in 1...iterations {
-            hmac = hmacSha256(key: Data(passwordBytes), data: hmac)
-            for i in 0..<hLen { t[i] ^= hmac[i] }
+    var derivedKey = [UInt8](repeating: 0, count: keyLengthBytes)
+    password.withUnsafeBytes { pwPtr in
+        salt.withUnsafeBytes { saltPtr in
+            _ = CCKeyDerivationPBKDF(
+                CCPBKDFAlgorithm(kCCPBKDF2),
+                pwPtr.baseAddress?.assumingMemoryBound(to: Int8.self), password.count,
+                saltPtr.baseAddress?.assumingMemoryBound(to: UInt8.self), salt.count,
+                CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
+                UInt32(iterations),
+                &derivedKey, keyLengthBytes
+            )
         }
-        result.replaceSubrange((blockIndex - 1) * hLen..<(blockIndex * hLen), with: t)
     }
-    return result.prefix(keyLengthBytes)
-}
-
-private extension Data {
-    var bytes: [UInt8] { [UInt8](self) }
-
-    var mutableBytes: UnsafeMutableRawPointer {
-        mutating get { withUnsafeMutableBytes { $0.baseAddress! } }
-    }
+    return Data(derivedKey)
 }

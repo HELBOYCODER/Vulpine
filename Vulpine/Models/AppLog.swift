@@ -2,6 +2,7 @@
 // Ring-buffer logger — port of FoxyVPN's data/AppLogger.kt.
 
 import Foundation
+import os
 
 enum LogLevel: Int, Sendable {
     case info

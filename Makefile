@@ -1,15 +1,15 @@
-.PHONY: all build run test clean
+.PHONY: all build run dmg test clean
 
 all: build
 
 build:
 	@bash scripts/build.sh
 
+dmg:
+	@bash scripts/build-dmg.sh
+
 run: build
 	open build/Vulpine.app
-
-test:
-	swift run --target VulpineTests
 
 clean:
 	rm -rf .build build
