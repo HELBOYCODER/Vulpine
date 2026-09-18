@@ -4,6 +4,10 @@
 //
 // Network.framework (NWConnection) powers the TLS transport with ALPN ["h2"]. Streams
 // are multiplexed as RFC 9113 HTTP/2 streams using HTTP2Frame and HPACK.
+//
+// v1.1.0: enforces HTTP/2 send-side flow control (per-stream + connection windows with
+// buffering until WINDOW_UPDATE), fails openStream() after a timeout instead of hanging
+// forever, accumulates CONTINUATION frames, and logs HPACK decode failures.
 
 import Foundation
 import Network
@@ -31,23 +35,21 @@ enum UpstreamError: LocalizedError {
 final class H2Stream {
     let streamId: Int32
     let targetAuthority: String
-    private(set) var remoteWindow: Int32 = 65_535
 
     var onData: ((Data) -> Void)?
     var onClose: (() -> Void)?
     var onConnected: ((Int) -> Void)?
 
-    private let lock = NSLock()
+    /// Send-side state — only touched on the session queue.
+    /// Bytes the server allows us to send on this stream (RFC 9113 §5.2.1).
+    fileprivate var sendWindow: Int32 = 65_535
+    fileprivate var pendingChunks: [Data] = []
+    fileprivate var pendingEnd = false
+    fileprivate var ended = false
 
     init(streamId: Int32, targetAuthority: String) {
         self.streamId = streamId
         self.targetAuthority = targetAuthority
-    }
-
-    func adjustRemoteWindow(by delta: Int32) {
-        lock.lock()
-        defer { lock.unlock() }
-        remoteWindow += delta
     }
 }
 
@@ -64,11 +66,16 @@ final class H2UpstreamSession {
 
     private var nextStreamId: Int32 = 1
     private var streams: [Int32: H2Stream] = [:]
-    private var connectionRemoteWindow: Int32 = 65_535
+    /// Bytes the server allows us to send on the connection as a whole.
+    private var connectionSendWindow: Int32 = 65_535
+    /// The server's advertised SETTINGS_INITIAL_WINDOW_SIZE for new streams.
+    private var serverInitialWindowSize: Int32 = 65_535
+    /// HEADERS frame seen without END_HEADERS — waiting for CONTINUATION frames.
+    private var pendingHeaders: (streamId: Int32, block: Data)?
 
-    @Published private(set) var isConnected = false
+    private(set) var isConnected = false
     private var isClosing = false
-    private let lock = NSLock()
+    private var deathReported = false
 
     var onSessionDead: (() -> Void)?
 
@@ -80,9 +87,7 @@ final class H2UpstreamSession {
     }
 
     func updateBearerToken(_ token: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        self.bearerToken = token
+        bearerToken = token
     }
 
     func connect() async throws {
@@ -145,7 +150,7 @@ final class H2UpstreamSession {
             (HTTP2Settings.maxFrameSize, 16_384),
         ])
         preface.append(settings)
-        // Up-size the connection-level window so we are never bottlenecked on Fastly's side.
+        // Up-size the connection-level receive window so we are never bottlenecked on Fastly's side.
         preface.append(HTTP2FrameEncoder.windowUpdate(streamId: 0, increment: 1_048_576))
         connection?.send(content: preface, completion: .idempotent)
     }
@@ -171,26 +176,36 @@ final class H2UpstreamSession {
             case .settings:
                 if !frame.flags.contains(.ack) {
                     connection?.send(content: HTTP2FrameEncoder.settings([], ack: true), completion: .idempotent)
+                    applyServerSettings(frame.payload)
                 }
             case .ping:
                 if !frame.flags.contains(.ack) {
                     connection?.send(content: HTTP2FrameEncoder.ping(payload: frame.payload, ack: true), completion: .idempotent)
                 }
             case .windowUpdate:
-                if frame.payload.count >= 4 {
-                    let increment = Int32(frame.payload.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian } & 0x7FFF_FFFF)
-                    if frame.streamId == 0 {
-                        connectionRemoteWindow += increment
-                    } else if let stream = streams[frame.streamId] {
-                        stream.adjustRemoteWindow(by: increment)
-                    }
-                }
+                handleWindowUpdate(frame)
             case .headers:
-                handleHeadersFrame(frame)
+                if frame.flags.contains(.endHeaders) {
+                    handleHeaders(streamId: frame.streamId, block: frame.payload)
+                } else {
+                    pendingHeaders = (streamId: frame.streamId, block: frame.payload)
+                }
+            case .continuation:
+                guard var pending = pendingHeaders, pending.streamId == frame.streamId else { break }
+                pending.block.append(frame.payload)
+                if frame.flags.contains(.endHeaders) {
+                    pendingHeaders = nil
+                    handleHeaders(streamId: pending.streamId, block: pending.block)
+                } else {
+                    pendingHeaders = pending
+                }
             case .data:
                 handleDataFrame(frame)
             case .rstStream:
-                streams.removeValue(forKey: frame.streamId)?.onClose?()
+                pendingHeaders = nil
+                if let stream = streams.removeValue(forKey: frame.streamId) {
+                    stream.onClose?()
+                }
             case .goaway:
                 handleDeath()
             default:
@@ -199,12 +214,57 @@ final class H2UpstreamSession {
         }
     }
 
-    private func handleHeadersFrame(_ frame: HTTP2Frame) {
-        guard let stream = streams[frame.streamId] else { return }
-        guard let headers = try? hpackDecoder.decode(frame.payload) else { return }
+    /// Applies the server's SETTINGS_INITIAL_WINDOW_SIZE delta to every open stream (RFC 9113 §6.5.2).
+    private func applyServerSettings(_ payload: Data) {
+        var offset = 0
+        while offset + 6 <= payload.count {
+            let id = (UInt16(payload[offset]) << 8) | UInt16(payload[offset + 1])
+            let value = payload.subdata(in: (offset + 2)..<(offset + 6))
+                .withUnsafeBytes { UInt32(bigEndian: $0.load(as: UInt32.self)) }
+            if id == HTTP2Settings.initialWindowSize {
+                let newValue = Int32(bitPattern: value & 0x7FFF_FFFF)
+                let delta = newValue - serverInitialWindowSize
+                serverInitialWindowSize = newValue
+                if delta != 0 {
+                    for (streamId, stream) in streams {
+                        stream.sendWindow += delta
+                        flushStream(streamId)
+                    }
+                }
+            }
+            offset += 6
+        }
+    }
+
+    private func handleWindowUpdate(_ frame: HTTP2Frame) {
+        guard frame.payload.count >= 4 else { return }
+        let raw = frame.payload.subdata(in: 0..<4)
+            .withUnsafeBytes { UInt32(bigEndian: $0.load(as: UInt32.self)) } & 0x7FFF_FFFF
+        let increment = Int32(bitPattern: raw)
+        if frame.streamId == 0 {
+            connectionSendWindow += increment
+            for streamId in streams.keys { flushStream(streamId) }
+        } else if let stream = streams[frame.streamId] {
+            stream.sendWindow += increment
+            flushStream(frame.streamId)
+        }
+    }
+
+    private func handleHeaders(streamId: Int32, block: Data) {
+        guard let stream = streams[streamId] else { return }
+        let headers: [HPACKHeader]
+        do {
+            headers = try hpackDecoder.decode(block)
+        } catch {
+            Task { await AppLog.shared.error("H2", "HPACK decode failed for stream \(streamId): \(error)") }
+            streams.removeValue(forKey: streamId)
+            stream.onConnected?(0)
+            return
+        }
         for header in headers {
             if header.name == ":status", let status = Int(header.value) {
                 stream.onConnected?(status)
+                return
             }
         }
     }
@@ -216,15 +276,18 @@ final class H2UpstreamSession {
             + HTTP2FrameEncoder.windowUpdate(streamId: frame.streamId, increment: UInt32(frame.payload.count))
         connection?.send(content: windowAck, completion: .idempotent)
 
-        stream.onData?(frame.payload)
+        if !frame.payload.isEmpty {
+            stream.onData?(frame.payload)
+        }
         if frame.flags.contains(.endStream) {
-            stream.onClose?()
             streams.removeValue(forKey: frame.streamId)
+            stream.onClose?()
         }
     }
 
     /// Opens an HTTP/2 CONNECT tunnel to `targetHost:targetPort` carrying arbitrary TCP traffic.
     /// Equivalent of FoxyVPN's `UpstreamSession.openStream(targetHost, targetPort)`.
+    /// Fails with `UpstreamError.timeout` if the edge does not answer within 10 seconds.
     func openStream(targetHost: String, targetPort: Int) async throws -> H2Stream {
         guard isConnected else { throw UpstreamError.sessionDead }
         let authority = "\(targetHost):\(targetPort)"
@@ -235,19 +298,32 @@ final class H2UpstreamSession {
                 self.nextStreamId += 2
 
                 let stream = H2Stream(streamId: streamId, targetAuthority: authority)
+                stream.sendWindow = self.serverInitialWindowSize
                 self.streams[streamId] = stream
 
                 var resumed = false
-                stream.onConnected = { status in
+                let resume: (Result<H2Stream, Error>) -> Void = { res in
                     guard !resumed else { return }
                     resumed = true
+                    continuation.resume(with: res)
+                }
+                stream.onConnected = { status in
                     if status >= 200 && status < 300 {
-                        continuation.resume(returning: stream)
+                        resume(.success(stream))
                     } else if status == 401 || status == 403 || status == 407 {
-                        continuation.resume(throwing: UpstreamError.unauthenticated)
+                        self.streams.removeValue(forKey: streamId)
+                        resume(.failure(UpstreamError.unauthenticated))
                     } else {
-                        continuation.resume(throwing: UpstreamError.rejected(statusCode: status, authority: authority))
+                        self.streams.removeValue(forKey: streamId)
+                        resume(.failure(UpstreamError.rejected(statusCode: status, authority: authority)))
                     }
+                }
+
+                // Never hang forever if the edge goes silent.
+                self.queue.asyncAfter(deadline: .now() + 10) {
+                    guard !resumed else { return }
+                    self.streams.removeValue(forKey: streamId)
+                    resume(.failure(UpstreamError.timeout(authority: authority)))
                 }
 
                 let connectHeaders: [(String, String)] = [
@@ -263,20 +339,45 @@ final class H2UpstreamSession {
         }
     }
 
-    /// Sends raw bytes into an open stream.
+    /// Sends raw bytes into an open stream. Buffers behind the HTTP/2 flow-control
+    /// windows and flushes as WINDOW_UPDATE frames arrive from the server.
     func sendData(streamId: Int32, data: Data, endStream: Bool = false) {
         queue.async {
-            var offset = 0
-            let maxChunk = 16_384
-            while offset < data.count || (data.isEmpty && endStream) {
-                let end = min(offset + maxChunk, data.count)
-                let chunk = data.subdata(in: offset..<end)
-                let isLast = endStream && end == data.count
-                let frameData = HTTP2FrameEncoder.data(streamId: streamId, payload: chunk, endStream: isLast)
-                self.connection?.send(content: frameData, completion: .idempotent)
-                offset = end
-                if data.isEmpty { break }
+            guard let stream = self.streams[streamId], !stream.ended else { return }
+            if !data.isEmpty { stream.pendingChunks.append(data) }
+            if endStream { stream.pendingEnd = true }
+            self.flushStream(streamId)
+        }
+    }
+
+    /// Sends whatever the stream's buffer allows given the stream + connection windows.
+    /// Must be called on the session queue.
+    private func flushStream(_ streamId: Int32) {
+        guard let stream = streams[streamId], !stream.ended else { return }
+        while !stream.pendingChunks.isEmpty {
+            guard connectionSendWindow > 0, stream.sendWindow > 0 else { return }
+            let head = stream.pendingChunks[0]
+            let allowed = min(min(16_384, Int(connectionSendWindow), Int(stream.sendWindow)), head.count)
+            let chunk = head.subdata(in: 0..<allowed)
+            connection?.send(
+                content: HTTP2FrameEncoder.data(streamId: streamId, payload: chunk, endStream: false),
+                completion: .idempotent
+            )
+            connectionSendWindow -= Int32(allowed)
+            stream.sendWindow -= Int32(allowed)
+            if allowed == head.count {
+                stream.pendingChunks.removeFirst()
+            } else {
+                stream.pendingChunks[0] = head.subdata(in: allowed..<head.count)
             }
+        }
+        // A zero-length DATA frame with END_STREAM consumes no flow-control credit.
+        if stream.pendingEnd {
+            connection?.send(
+                content: HTTP2FrameEncoder.data(streamId: streamId, payload: Data(), endStream: true),
+                completion: .idempotent
+            )
+            stream.ended = true
         }
     }
 
@@ -302,9 +403,13 @@ final class H2UpstreamSession {
     }
 
     private func handleDeath() {
+        guard !deathReported else { return }
+        deathReported = true
         isConnected = false
-        for stream in streams.values { stream.onClose?() }
+        let openStreams = streams
         streams.removeAll()
+        pendingHeaders = nil
+        for stream in openStreams.values { stream.onClose?() }
         onSessionDead?()
     }
 }

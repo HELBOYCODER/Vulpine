@@ -36,6 +36,17 @@ struct MainView: View {
                     rxRatePerSecond: tunnel.rxRatePerSecond,
                     txRatePerSecond: tunnel.txRatePerSecond
                 )
+
+                if let exit = tunnel.exitInfo {
+                    Label {
+                        Text(exitTitle(exit))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } icon: {
+                        Image(systemName: "checkmark.shield")
+                            .foregroundColor(Theme.accent)
+                    }
+                }
             }
 
             Spacer()
@@ -113,6 +124,11 @@ struct MainView: View {
         case .connecting: return "Connecting..."
         case .disconnected: return "Not connected"
         }
+    }
+
+    private func exitTitle(_ exit: TunnelExitInfo) -> String {
+        let country = exit.country.isEmpty ? "unknown" : exit.country
+        return exit.ip.isEmpty ? "Exit: \(country)" : "Exit: \(country) • \(exit.ip)"
     }
 
     private func toggleConnection() {

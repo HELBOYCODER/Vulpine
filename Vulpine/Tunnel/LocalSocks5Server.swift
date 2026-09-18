@@ -4,6 +4,9 @@
 // via CONNECT streams.
 //
 // Powered by Network.framework's NWListener (macOS native socket listener).
+//
+// v1.1.0: reads the greeting and request through a proper state machine so partial reads
+// and clients that pipeline greeting+request in one segment are both handled.
 
 import Foundation
 import Network
@@ -20,7 +23,7 @@ final class LocalSocks5Server {
     private var rxBytes: Int64 = 0
     private let lock = NSLock()
 
-    init(port: Int = 10808) {
+    init(port: Int = 1080) {
         self.port = port
     }
 
@@ -33,10 +36,11 @@ final class LocalSocks5Server {
         listener.newConnectionHandler = { [weak self] connection in
             self?.handleClientConnection(connection)
         }
-        listener.stateUpdateHandler = { state in
+        listener.stateUpdateHandler = { [weak self] state in
             switch state {
             case .ready:
-                Task { await AppLog.shared.info("SOCKS5", "listening on 127.0.0.1:\(self.port)") }
+                let port = self?.port ?? 0
+                Task { await AppLog.shared.info("SOCKS5", "listening on 127.0.0.1:\(port)") }
             case .failed(let err):
                 Task { await AppLog.shared.error("SOCKS5", "listener failed", error: err) }
             default:
@@ -51,80 +55,133 @@ final class LocalSocks5Server {
         listener = nil
     }
 
+    // MARK: - SOCKS5 handshake
+
     private func handleClientConnection(_ connection: NWConnection) {
         connection.start(queue: queue)
-        // Step 1: SOCKS5 greeting (0x05, NMETHODS, METHODS...).
-        connection.receive(minimumIncompleteLength: 2, maximumLength: 257) { [weak self] content, _, isComplete, _ in
-            guard let self, let content, content.count >= 2, content[0] == 0x05 else {
+        receive(connection, buffer: Data(), stage: .greeting)
+    }
+
+    private enum Stage { case greeting, request }
+
+    private func receive(_ connection: NWConnection, buffer: Data, stage: Stage) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1_024) { [weak self] content, _, isComplete, error in
+            guard let self else { return }
+            var data = buffer
+            if let content { data.append(content) }
+            if error != nil {
                 connection.cancel()
                 return
             }
-            // Method selection: 0x00 (NO AUTHENTICATION REQUIRED).
-            let reply = Data([0x05, 0x00])
-            connection.send(content: reply, completion: .contentProcessed { [weak self] error in
-                guard error == nil else { connection.cancel(); return }
-                self?.readRequest(connection)
-            })
+            if data.isEmpty && isComplete {
+                connection.cancel()
+                return
+            }
+            switch stage {
+            case .greeting:
+                self.consumeGreeting(connection, data)
+            case .request:
+                self.consumeRequest(connection, data)
+            }
         }
     }
 
-    private func readRequest(_ connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 4, maximumLength: 512) { [weak self] content, _, _, _ in
-            guard let self, let content, content.count >= 4 else {
+    private func consumeGreeting(_ connection: NWConnection, _ data: Data) {
+        guard data.count >= 2 else {
+            receive(connection, buffer: data, stage: .greeting)
+            return
+        }
+        guard data[0] == 0x05 else {
+            connection.cancel()
+            return
+        }
+        let methodsCount = Int(data[1])
+        guard data.count >= 2 + methodsCount else {
+            receive(connection, buffer: data, stage: .greeting)
+            return
+        }
+        // Method selection: 0x00 (NO AUTHENTICATION REQUIRED). Any surplus bytes already
+        // belong to the request — most clients wait, but keep them just in case.
+        let leftover = methodsCount + 2 < data.count ? data.subdata(in: (2 + methodsCount)..<data.count) : Data()
+        let reply = Data([0x05, 0x00])
+        connection.send(content: reply, completion: .contentProcessed { [weak self] error in
+            guard let self, error == nil else {
                 connection.cancel()
                 return
             }
-            guard content[0] == 0x05, content[1] == 0x01 else {
-                // Command not supported (we only bridge CONNECT 0x01).
-                self.sendSocksReply(connection, replyCode: 0x07)
-                return
-            }
+            self.consumeRequest(connection, leftover)
+        })
+    }
 
-            guard let (host, port) = self.parseTarget(content) else {
-                self.sendSocksReply(connection, replyCode: 0x08)
-                return
-            }
+    private func consumeRequest(_ connection: NWConnection, _ data: Data) {
+        guard data.count >= 4 else {
+            receive(connection, buffer: data, stage: .request)
+            return
+        }
+        guard data[0] == 0x05, data[1] == 0x01 else {
+            // Command not supported (we only bridge CONNECT 0x01).
+            sendSocksReply(connection, replyCode: 0x07)
+            return
+        }
 
-            guard let session = self.sessionProvider?(), session.isConnected else {
+        switch parseTarget(data) {
+        case .needMore:
+            receive(connection, buffer: data, stage: .request)
+        case .invalid:
+            sendSocksReply(connection, replyCode: 0x08)
+        case .ok(let host, let port):
+            openTunnel(connection, host: host, port: port)
+        }
+    }
+
+    private func openTunnel(_ connection: NWConnection, host: String, port: Int) {
+        guard let session = sessionProvider?(), session.isConnected else {
+            sendSocksReply(connection, replyCode: 0x05)
+            return
+        }
+
+        Task {
+            do {
+                let stream = try await session.openStream(targetHost: host, targetPort: port)
+                self.sendSocksReply(connection, replyCode: 0x00)
+                self.bridge(client: connection, stream: stream, session: session)
+            } catch UpstreamError.unauthenticated {
+                self.sendSocksReply(connection, replyCode: 0x01)
+            } catch UpstreamError.rejected {
                 self.sendSocksReply(connection, replyCode: 0x05)
-                return
-            }
-
-            Task {
-                do {
-                    let stream = try await session.openStream(targetHost: host, targetPort: port)
-                    self.sendSocksReply(connection, replyCode: 0x00)
-                    self.bridge(client: connection, stream: stream, session: session)
-                } catch UpstreamError.unauthenticated {
-                    self.sendSocksReply(connection, replyCode: 0x01)
-                } catch UpstreamError.rejected {
-                    self.sendSocksReply(connection, replyCode: 0x05)
-                } catch {
-                    self.sendSocksReply(connection, replyCode: 0x04)
-                }
+            } catch {
+                self.sendSocksReply(connection, replyCode: 0x04)
             }
         }
     }
 
-    private func parseTarget(_ data: Data) -> (String, Int)? {
-        guard data.count >= 7 else { return nil }
+    private enum TargetParseResult {
+        case needMore
+        case invalid
+        case ok(host: String, port: Int)
+    }
+
+    private func parseTarget(_ data: Data) -> TargetParseResult {
+        guard data.count >= 5 else { return .needMore }
         let addrType = data[3]
         var offset = 4
         let host: String
 
         switch addrType {
         case 0x01: // IPv4
-            guard data.count >= 10 else { return nil }
+            guard data.count >= 10 else { return .needMore }
             host = "\(data[4]).\(data[5]).\(data[6]).\(data[7])"
             offset = 8
         case 0x03: // Domain name
             let len = Int(data[4])
-            guard data.count >= 5 + len + 2 else { return nil }
-            guard let domain = String(data: data.subdata(in: 5..<(5 + len)), encoding: .ascii) else { return nil }
+            guard data.count >= 5 + len else { return .needMore }
+            guard let domain = String(data: data.subdata(in: 5..<(5 + len)), encoding: .ascii) else {
+                return .invalid
+            }
             host = domain
             offset = 5 + len
         case 0x04: // IPv6
-            guard data.count >= 22 else { return nil }
+            guard data.count >= 22 else { return .needMore }
             var parts = [String]()
             for i in stride(from: 4, to: 20, by: 2) {
                 let part = (UInt16(data[i]) << 8) | UInt16(data[i + 1])
@@ -133,11 +190,12 @@ final class LocalSocks5Server {
             host = parts.joined(separator: ":")
             offset = 20
         default:
-            return nil
+            return .invalid
         }
 
+        guard data.count >= offset + 2 else { return .needMore }
         let port = (Int(data[offset]) << 8) | Int(data[offset + 1])
-        return (host, port)
+        return .ok(host: host, port: port)
     }
 
     private func sendSocksReply(_ connection: NWConnection, replyCode: UInt8) {
@@ -146,6 +204,8 @@ final class LocalSocks5Server {
             if replyCode != 0x00 { connection.cancel() }
         })
     }
+
+    // MARK: - Bridging
 
     /// Bi-directional pump between the local NWConnection and the H2 stream.
     private func bridge(client: NWConnection, stream: H2Stream, session: H2UpstreamSession) {
@@ -177,6 +237,8 @@ final class LocalSocks5Server {
                     self.txBytes += Int64(content.count)
                     self.lock.unlock()
                     session.sendData(streamId: stream.streamId, data: content, endStream: isComplete)
+                } else if isComplete {
+                    session.sendData(streamId: stream.streamId, data: Data(), endStream: true)
                 }
                 if isComplete || error != nil {
                     closeBoth()

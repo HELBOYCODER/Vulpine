@@ -16,6 +16,7 @@ struct VulpineApp: App {
         WindowGroup {
             contentView
                 .onAppear(perform: checkSession)
+                .onOpenURL(perform: handleURL)
         }
         .windowResizability(.contentSize)
 
@@ -75,7 +76,11 @@ struct VulpineApp: App {
 
     private var menuBarStatusText: String {
         switch tunnel.state {
-        case .connected: return "Protected — Connected"
+        case .connected:
+            if let country = tunnel.exitInfo?.country, !country.isEmpty {
+                return "Connected — \(country)"
+            }
+            return "Connected"
         case .connecting: return "Connecting..."
         case .disconnected: return "Disconnected"
         }
@@ -86,6 +91,26 @@ struct VulpineApp: App {
             let status = await auth.restoreSession()
             hasCheckedSession = true
             isSignedIn = (status == .active)
+        }
+    }
+
+    // MARK: - vulpine:// URL scheme (connect / disconnect / toggle)
+
+    private func handleURL(_ url: URL) {
+        let action = url.host?.lowercased()
+            ?? url.absoluteString
+                .replacingOccurrences(of: "vulpine:", with: "")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                .lowercased()
+        switch action {
+        case "connect":
+            tunnel.start()
+        case "disconnect":
+            tunnel.stop()
+        case "toggle":
+            tunnel.state == .connected ? tunnel.stop() : tunnel.start()
+        default:
+            Task { await AppLog.shared.warn("App", "unknown vulpine:// action: \(url.absoluteString)") }
         }
     }
 }

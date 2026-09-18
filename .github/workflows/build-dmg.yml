@@ -97,6 +97,7 @@ jobs:
           ۳. برنامه را باز کرده، با حساب کاربری فایرفاکس خود لاگین کنید و لوکیشن دلخواه را انتخاب نمایید.
           EOF
           )
+          RELEASE_BODY="${RELEASE_BODY//v1.0.0/$TAG}"
 
           # If release exists, upload assets with clobber; otherwise create new release
           if gh release view "$TAG" >/dev/null 2>&1; then

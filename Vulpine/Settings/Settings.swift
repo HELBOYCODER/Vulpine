@@ -59,8 +59,9 @@ final class Settings: ObservableObject {
         return Self.isValidDnsServer(value) ? value : nil
     }
 
-    /// Equivalent of `proxyOnlyMode`: runs the SOCKS5 gateway without raising a system tunnel.
-    /// On macOS this means no NetworkExtension is asked for; other apps must be pointed at the proxy.
+    /// Equivalent of `proxyOnlyMode`: routes the system's traffic through the local SOCKS5
+    /// bridge by configuring the macOS system proxy. Defaults to ON — without it the tunnel
+    /// would come up but no app traffic would actually use it.
     @Published var proxyOnlyMode: Bool {
         didSet { defaults.set(proxyOnlyMode, forKey: Key.proxyOnlyMode) }
     }
@@ -160,7 +161,7 @@ final class Settings: ObservableObject {
         dohProvider = DohProvider(rawValue: defaults.string(forKey: Key.dohProvider) ?? "") ?? .automatic
         customDnsEnabled = defaults.object(forKey: Key.customDnsEnabled) as? Bool ?? false
         customDnsServer = defaults.string(forKey: Key.customDnsServer) ?? Settings.defaultCustomDnsServer
-        proxyOnlyMode = defaults.object(forKey: Key.proxyOnlyMode) as? Bool ?? false
+        proxyOnlyMode = defaults.object(forKey: Key.proxyOnlyMode) as? Bool ?? true
         launchAtLogin = defaults.object(forKey: Key.launchAtLogin) as? Bool ?? false
         customEdgeAddress = defaults.string(forKey: Key.customEdgeAddress) ?? ""
         upstreamProxyEnabled = defaults.object(forKey: Key.upstreamProxyEnabled) as? Bool ?? false
