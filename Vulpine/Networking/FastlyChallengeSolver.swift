@@ -50,9 +50,8 @@ final class FastlyChallengeSolver {
     }
 
     private func baseOrigin(_ prefixUrl: String) -> String {
-        let idx = prefixUrl.range(of: "/_fs-ch-")
-        return idx.map { String(prefixUrl[..<prefixUrl.distance(from: prefixUrl.startIndex, to: $0.lowerBound)]) }
-            ?? prefixUrl
+        guard let idx = prefixUrl.range(of: "/_fs-ch-") else { return prefixUrl }
+        return String(prefixUrl[..<idx.lowerBound])
     }
 
     /// Proof-of-work: find a two-character suffix so that SHA-256(base + suffix) matches the target.
